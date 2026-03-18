@@ -212,9 +212,6 @@ node_modules/
 /out/
 /build
 
-# Next.js build output
-.next
-
 # TypeScript
 *.tsbuildinfo
 next-env.d.ts
