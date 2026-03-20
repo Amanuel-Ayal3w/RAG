@@ -5,7 +5,7 @@ This workspace is split into:
 - `frontend/`: Next.js modern chat UI
 - `backend/`: FastAPI RAG API with OpenAI and PostgreSQL `pgvector`
 
-## 1) Prepare local PostgreSQL + pgvector (no Docker)
+## 1) Prepare local PostgreSQL + pgvector
 
 Create a local database/user that matches `backend/.env` defaults:
 
