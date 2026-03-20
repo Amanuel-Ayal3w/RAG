@@ -1,0 +1,22 @@
+[project]
+name = "rag-backend"
+version = "0.1.0"
+description = "FastAPI RAG backend with OpenAI + pgvector"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi==0.115.12",
+  "uvicorn[standard]==0.34.0",
+  "sqlalchemy==2.0.39",
+  "asyncpg==0.30.0",
+  "pgvector==0.3.6",
+  "openai==1.68.2",
+  "pydantic==2.10.6",
+  "pydantic-settings==2.8.1",
+  "python-dotenv==1.0.1",
+  "pypdf==5.4.0",
+  "python-docx==1.1.2",
+  "python-multipart==0.0.19",
+]
+
+[tool.uv]
+package = false
