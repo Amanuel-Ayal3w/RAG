@@ -1,27 +1,26 @@
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from openai import AsyncOpenAI
 
 from app.config import settings
 
-
+# Raw client for specific non-standard calls (like the image ingestion describer)
 client = AsyncOpenAI(api_key=settings.openai_api_key)
 
+# LangChain abstractions
+embeddings = OpenAIEmbeddings(
+    model=settings.openai_embedding_model,
+    dimensions=settings.embedding_dimensions,
+    api_key=settings.openai_api_key,
+)
 
-async def get_embedding(text: str) -> list[float]:
-    response = await client.embeddings.create(
-        model=settings.openai_embedding_model,
-        input=text,
-        dimensions=settings.embedding_dimensions,
-    )
-    return response.data[0].embedding
+chat_llm = ChatOpenAI(
+    model=settings.openai_chat_model,
+    temperature=0.2,
+    api_key=settings.openai_api_key,
+)
 
 
-async def generate_chat_completion(messages: list[dict]) -> str:
-    response = await client.chat.completions.create(
-        model=settings.openai_chat_model,
-        messages=messages,
-        temperature=0.2,
-    )
-    return response.choices[0].message.content or ""
+
 
 
 async def describe_image_base64(b64: str, media_type: str) -> str:

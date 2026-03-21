@@ -2,28 +2,24 @@ import base64
 import re
 from io import BytesIO
 
-import nltk
 from docx import Document
 from pypdf import PdfReader
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.prompts import ChatPromptTemplate
 
 from app.config import settings
 from app.models import Conversation, DocumentChunk, Message
 from app.schemas import ChatMessage, IngestDocument, IngestedDocument, RetrievedChunk
 from app.services.openai_service import (
     describe_image_base64,
-    generate_chat_completion,
-    generate_chat_completion_vision,
-    get_embedding,
+    chat_llm,
+    embeddings,
 )
 
-# Download punkt tokeniser data on first run (no-op if already cached)
-try:
-    nltk.data.find("tokenizers/punkt_tab")
-except LookupError:
-    nltk.download("punkt_tab", quiet=True)
-
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # Supported image media types for ingestion
 IMAGE_MEDIA_TYPES: dict[str, str] = {
@@ -34,98 +30,51 @@ IMAGE_MEDIA_TYPES: dict[str, str] = {
     ".gif": "image/gif",
 }
 
+def chunk_text(text: str) -> list[str]:
+    """Split *text* into chunks using LangChain's RecursiveCharacterTextSplitter.
 
-def _split_sentences(text: str) -> list[str]:
-    """Split text into sentences using NLTK's Punkt tokenizer."""
-    return nltk.sent_tokenize(text)
-
-
-def chunk_text(
-    text: str,
-    max_chunk_chars: int = 1200,
-    overlap_sentences: int = 1,
-) -> list[str]:
-    """Split *text* into chunks that always start and end on sentence boundaries.
-
-    Strategy
-    --------
-    1. Split on blank lines to recover natural paragraphs.
-    2. Tokenise each paragraph into sentences with NLTK Punkt.
-    3. Accumulate sentences into a chunk until adding the next sentence would
-       exceed *max_chunk_chars*; then close the chunk and begin the next one,
-       seeding it with the last *overlap_sentences* sentences of the previous
-       chunk so context is preserved across boundaries.
-
-    Parameters
-    ----------
-    text:              Raw document text.
-    max_chunk_chars:   Soft upper bound on chunk length in characters.
-    overlap_sentences: How many trailing sentences from the previous chunk
-                       are prepended to the next chunk.
+    This attempts to split on paragraphs ('\n\n') first, then on sentences ('. '),
+    then on words (' '), guaranteeing chunks under the max size while preserving
+    semantic boundaries.
     """
-    # --- 1. Paragraph split ---
-    paragraphs = re.split(r"\n{2,}", text)
-
-    # --- 2. Sentence tokenisation ---
-    all_sentences: list[str] = []
-    for para in paragraphs:
-        para = para.strip()
-        if not para:
-            continue
-        sents = _split_sentences(para)
-        all_sentences.extend(s.strip() for s in sents if s.strip())
-
-    if not all_sentences:
-        return []
-
-    # --- 3. Accumulate into chunks ---
-    chunks: list[str] = []
-    current: list[str] = []
-    current_len = 0
-
-    for sent in all_sentences:
-        sent_len = len(sent)
-
-        # If a single sentence is already huge, emit it alone.
-        if not current and sent_len >= max_chunk_chars:
-            chunks.append(sent)
-            continue
-
-        # Close the current chunk when adding this sentence would overflow.
-        if current and current_len + 1 + sent_len > max_chunk_chars:
-            chunks.append(" ".join(current))
-            # Seed next chunk with overlap
-            overlap = current[-overlap_sentences:] if overlap_sentences else []
-            current = list(overlap)
-            current_len = sum(len(s) for s in current) + max(0, len(current) - 1)
-
-        current.append(sent)
-        current_len += (1 if current_len else 0) + sent_len
-
-    if current:
-        chunks.append(" ".join(current))
-
-    return chunks
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1200,
+        chunk_overlap=150,
+        length_function=len,
+        separators=["\n\n", "\n", ". ", " ", ""],
+    )
+    return splitter.split_text(text)
 
 
 async def ingest_documents(session: AsyncSession, docs: list[IngestDocument]) -> int:
-    rows_to_add: list[DocumentChunk] = []
+    total_chunks = 0
     for doc in docs:
         chunks = chunk_text(doc.text)
-        for chunk in chunks:
-            embedding = await get_embedding(chunk)
+        if not chunks:
+            continue
+
+        # Use LangChain to batch-embed all chunks for this document
+        chunk_embeddings = await embeddings.aembed_documents(chunks)
+
+        rows_to_add: list[DocumentChunk] = []
+        for chunk_content, chunk_embedding in zip(chunks, chunk_embeddings):
             rows_to_add.append(
                 DocumentChunk(
                     source_id=doc.source_id,
-                    content=chunk,
+                    content=chunk_content,
                     chunk_metadata=doc.metadata,
-                    embedding=embedding,
+                    embedding=chunk_embedding,
                 )
             )
 
-    session.add_all(rows_to_add)
+        session.add_all(rows_to_add)
+        total_chunks += len(rows_to_add)
+
     await session.commit()
-    return len(rows_to_add)
+    return total_chunks
+
+
+
 
 
 async def list_ingested_documents(session: AsyncSession) -> list[IngestedDocument]:
@@ -228,7 +177,7 @@ async def fetch_sliding_window_messages(
 async def retrieve_relevant_chunks(
     session: AsyncSession, query: str
 ) -> list[tuple[DocumentChunk, float]]:
-    query_embedding = await get_embedding(query)
+    query_embedding = await embeddings.aembed_query(query)
 
     stmt = (
         select(
@@ -275,6 +224,7 @@ async def run_chat_turn(
     retrieved = await retrieve_relevant_chunks(session, user_message)
     context = build_context(retrieved)
 
+    # Construct the base system instructions
     system_prompt = (
         "You are a professional RAG assistant. "
         "Write clear, concise responses with a brief direct answer first, then structured details. "
@@ -286,25 +236,37 @@ async def run_chat_turn(
         "If context is insufficient, state that clearly and provide best-effort guidance."
     )
 
-    llm_messages: list[dict] = [{"role": "system", "content": system_prompt}]
+    # Convert past string-based history into LangChain message objects
+    langchain_messages = [SystemMessage(content=system_prompt)]
+
     if context:
-        llm_messages.append(
-            {
-                "role": "system",
-                "content": f"Retrieved knowledge:\n{context}",
-            }
+        langchain_messages.append(
+            SystemMessage(content=f"Retrieved knowledge:\n{context}")
         )
 
-    llm_messages.extend(
-        [{"role": message.role, "content": message.content} for message in memory]
-    )
-    llm_messages.append({"role": "user", "content": user_message})
+    for msg in memory:
+        if msg.role == "user":
+            langchain_messages.append(HumanMessage(content=msg.content))
+        elif msg.role == "assistant":
+            langchain_messages.append(AIMessage(content=msg.content))
 
-    # Use vision completion if an image is attached, otherwise plain text
+    # Append the current user message, handling potential image attachments
     if image_b64 and image_media_type:
-        answer = await generate_chat_completion_vision(llm_messages, image_b64, image_media_type)
+        # LangChain vision format
+        vision_content = [
+            {"type": "text", "text": user_message},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{image_media_type};base64,{image_b64}"},
+            },
+        ]
+        langchain_messages.append(HumanMessage(content=vision_content))
     else:
-        answer = await generate_chat_completion(llm_messages)
+        langchain_messages.append(HumanMessage(content=user_message))
+
+    # Invoke the LangChain ChatOpenAI instance
+    response = await chat_llm.ainvoke(langchain_messages)
+    answer = str(response.content)
 
     assistant_row = Message(conversation_id=conversation.id, role="assistant", content=answer)
     session.add(assistant_row)
