@@ -27,6 +27,8 @@ class IngestedDocument(BaseModel):
 class ChatRequest(BaseModel):
     conversation_id: UUID | None = None
     message: str = Field(min_length=1)
+    image_base64: str | None = None
+    image_media_type: str | None = None  # e.g. "image/png"
 
 
 class ChatMessage(BaseModel):

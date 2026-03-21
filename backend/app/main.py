@@ -17,6 +17,7 @@ from app.schemas import (
     IngestedDocument,
 )
 from app.services.rag_service import (
+    IMAGE_MEDIA_TYPES,
     ingest_documents,
     list_ingested_documents,
     parse_document_bytes,
@@ -84,18 +85,24 @@ async def ingest_documents_endpoint(
             continue
 
         try:
-            text_content = parse_document_bytes(file.filename, raw_bytes)
+            # parse_document_bytes is now async (images need a vision API call)
+            text_content = await parse_document_bytes(file.filename, raw_bytes)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         if not text_content:
             continue
 
+        # Determine source type for metadata
+        lower_name = file.filename.lower()
+        is_image = any(lower_name.endswith(ext) for ext in IMAGE_MEDIA_TYPES)
+        source_type = "image_upload" if is_image else "upload"
+
         docs.append(
             IngestDocument(
                 source_id=file.filename,
                 text=text_content,
-                metadata={"source": "upload", "filename": file.filename},
+                metadata={"source": source_type, "filename": file.filename},
             )
         )
 
@@ -114,6 +121,8 @@ async def chat_endpoint(
         session=session,
         conversation_id=payload.conversation_id,
         user_message=payload.message,
+        image_b64=payload.image_base64,
+        image_media_type=payload.image_media_type,
     )
 
     return ChatResponse(

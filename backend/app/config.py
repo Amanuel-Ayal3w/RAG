@@ -13,6 +13,7 @@ class Settings(BaseSettings):
 
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     openai_chat_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_CHAT_MODEL")
+    openai_vision_model: str = Field(default="gpt-4o", alias="OPENAI_VISION_MODEL")
     openai_embedding_model: str = Field(
         default="text-embedding-3-small", alias="OPENAI_EMBEDDING_MODEL"
     )
